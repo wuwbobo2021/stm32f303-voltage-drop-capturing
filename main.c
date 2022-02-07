@@ -171,7 +171,7 @@ static void adc_get_refint(void)
 	const uint16_t times = 0x80;
 	static uint16_t raw_data[0x80];
 	
-	ADC_RegularChannelConfig(ADC1, ADC_Channel_18, 1, ADC_SampleTime_61Cycles5);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_18, 1, ADC_SampleTime_181Cycles5);
 	
 	ADC1->ISR &= ~ADC_FLAG_EOC;
 	ADC_StartConversion(ADC1);
