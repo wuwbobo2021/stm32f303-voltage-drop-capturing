@@ -9,7 +9,11 @@
 static float ad_vrefint = 1.2 * 4095.0 / 3.3; //it will be updated
 #define adc_to_voltage(ad_val) (VRefInt * ad_val/ad_vrefint)
 
+#define GPIO_ADC GPIOA
+#define RCC_AHBPeriph_GPIO_ADC RCC_AHBPeriph_GPIOA
+#define GPIO_Pin_ADC GPIO_Pin_1
 #define ADC_Channel_Bat ADC_Channel_2
+
 #define ADC_SampleTime_Bat ADC_SampleTime_61Cycles5
 
 #define VBatMin 0.8
@@ -47,8 +51,10 @@ static inline float get_average(uint16_t* raw_data, uint16_t cnt)
 	return (float)sum / cnt;
 }
 
-//remove 2 * bound extreme values. cnt should not exceed 0x200.
-static float get_stable_average(uint16_t* raw_data, uint16_t cnt, uint16_t bound)
+// Remove 2 * bound extreme values. cnt should not exceed 0x200.
+// Returns 0 if the difference between the min and max values
+// of the remaining data is still larger than diff_max.
+static float get_stable_average(uint16_t* raw_data, uint16_t cnt, uint16_t bound, float diff_max)
 {
 	if (cnt == 0) return 0;
 	if (bound * 2 >= cnt) bound = 0;
@@ -61,9 +67,9 @@ static float get_stable_average(uint16_t* raw_data, uint16_t cnt, uint16_t bound
 	}
 	
 	uint16_t cnt_rem = cnt;
-	uint16_t umin, umax;
+	uint16_t umin = 0, umax = 0;
 	uint16_t tmin, tmax;
-	for (uint16_t i = 0; i < bound; i++) {
+	for (uint16_t i = 0; i < bound + 1; i++) {
 		umin = UINT16_MAX; umax = 0;
 		
 		for (uint16_t j = 0; j < cnt; j++) {
@@ -78,12 +84,14 @@ static float get_stable_average(uint16_t* raw_data, uint16_t cnt, uint16_t bound
 			}
 		}
 		
+		if (i == bound) break; //after breaking, tmin and tmax are values of remaining data
 		sum -= data[tmin]; sum -= data[tmax];
 		cnt_rem -= 2;
 		
 		data[tmin] = data[tmax] = UINT16_MAX;
 	}
 	
+	if (umax - umin > diff_max) return 0;
 	return (float)sum / cnt_rem;
 }
 
@@ -127,12 +135,12 @@ static void adc_init()
 	uint32_t calibration_value = 0;
 	
 	RCC_ADCCLKConfig(RCC_ADC12PLLCLK_Div2);
-	RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIOA | RCC_AHBPeriph_ADC12, ENABLE);
+	RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIO_ADC | RCC_AHBPeriph_ADC12, ENABLE);
 	
-	GPIO_InitStruct.GPIO_Pin = GPIO_Pin_1;
+	GPIO_InitStruct.GPIO_Pin = GPIO_Pin_ADC;
 	GPIO_InitStruct.GPIO_Mode = GPIO_Mode_AN;
 	GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
-	GPIO_Init(GPIOA, &GPIO_InitStruct);
+	GPIO_Init(GPIO_ADC, &GPIO_InitStruct);
 	
 	ADC_VoltageRegulatorCmd(ADC1, ENABLE);
 	Delay(10);
@@ -170,7 +178,7 @@ static void adc_get_refint(void)
 	const uint16_t times = 0x80;
 	static uint16_t raw_data[0x80];
 	
-	ADC_RegularChannelConfig(ADC1, ADC_Channel_18, 1, ADC_SampleTime_61Cycles5);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_18, 1, ADC_SampleTime_181Cycles5);
 	
 	ADC1->ISR &= ~ADC_FLAG_EOC;
 	ADC_StartConversion(ADC1);
@@ -186,7 +194,9 @@ static void adc_get_refint(void)
 	ADC_StopConversion(ADC1);
 	while (ADC1->CR & ADC_CR_ADSTP);
 	
-	ad_vrefint = get_stable_average(raw_data, times, times / 4);
+	ad_vrefint = 0;
+	while (ad_vrefint == 0.0)
+		ad_vrefint = get_stable_average(raw_data, times, times / 4, 8);
 }
 
 static inline void adc_discard_one() //skip the first data that might be invalid
@@ -250,7 +260,7 @@ int main(void)
 					{dec = false; break;}
 			
 			if (dec) {
-				st = Measure_Capturing;
+				st = Measure_Capturing; flag_refresh_vbat = false;
 				icap = (ibuf + 1 < 2 * ADC_Cnt_Av_Out)? ibuf : (2 * ADC_Cnt_Av_Out - 1);
 				for (uint16_t i = 0; i <= icap; i++)
 					cap[i] = buf[i];
@@ -262,7 +272,8 @@ int main(void)
 		if (st == Measure_Capturing) {
 			cap[icap++] = buf[ibuf];
 			if (ibuf + 1 == ADC_Cnt_Measure) {
-				ad_vbat_load = get_stable_average(buf, ADC_Cnt_Measure, ADC_Cnt_Measure / 6);
+				ad_vbat_load = get_stable_average(buf, ADC_Cnt_Measure, ADC_Cnt_Measure / 4, 16);
+				if (ad_vbat_load == 0.0) {ibuf = 0; continue;}
 				if (ad_vbat_load > ad_vbat || ad_vbat - ad_vbat_load < AD_DecMin) { //false trigger
 					st = Measure_Connected;
 					flag_refresh_vbat = true;
@@ -277,10 +288,10 @@ int main(void)
 			if (icap < Capture_Buffer_Size)
 				cap[icap++] = buf[ibuf];
 			if (ibuf > 0 && (ibuf + 1) % ADC_Cnt_Measure == 0) {
-				float tmp = get_stable_average(buf + ibuf - ADC_Cnt_Measure + 1, ADC_Cnt_Measure, ADC_Cnt_Measure / 9);
+				float tmp = get_stable_average(buf + ibuf - ADC_Cnt_Measure + 1, ADC_Cnt_Measure, ADC_Cnt_Measure / 9, 8);
 				if (tmp > ad_vbat || ad_vbat - tmp < AD_DecMin / 4) {
 					for (uint16_t i = 0; i + ADC_Cnt_Av_Out < icap; i += ADC_Cnt_Av_Out) {
-						printf("%f ", adc_to_voltage(get_stable_average(cap + i, ADC_Cnt_Av_Out, ADC_Cnt_Av_Out / 6)));
+						printf("%f ", adc_to_voltage(get_stable_average(cap + i, ADC_Cnt_Av_Out, ADC_Cnt_Av_Out / 4, 32)));
 						Delay(5);
 					}
 					printf("\n\n");
@@ -293,7 +304,7 @@ int main(void)
 		
 		if (ibuf + 1 == ADC_Buffer_Size) {
 			if (st == Measure_Disconnected || flag_refresh_vbat) {
-				ad_vbat = get_stable_average(buf + ibuf - ADC_Cnt_Measure + 1, ADC_Cnt_Measure, ADC_Cnt_Measure / 6);
+				ad_vbat = get_stable_average(buf + ibuf - ADC_Cnt_Measure + 1, ADC_Cnt_Measure, ADC_Cnt_Measure / 4, 32);
 				if (ad_vbat >= AD_BatMin) {
 					if (st == Measure_Disconnected) {
 						st = Measure_Connected;
@@ -318,4 +329,3 @@ extern void assert_param(uint8_t expr)
 #else
 #endif
 }
-;
