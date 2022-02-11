@@ -287,4 +287,9 @@ extern void assert_param(uint8_t expr)
 #else
 #endif
 }
-;
+
+extern int fputc (int c, FILE* stream)
+{
+	ITM_SendChar(c);
+	return -1;
+}
