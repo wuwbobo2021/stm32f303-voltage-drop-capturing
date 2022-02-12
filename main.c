@@ -286,7 +286,7 @@ int main(void)
 					printf("Connected. Battery Voltage: %.3f V.\n", vbat);
 					printf("ADC Accuracy: %.3f ~ %.3f Bits.\n\n",
 					       adc_get_accuracy(ADC_SampleTime, true),
-						   adc_get_accuracy(ADC_SampleTime, false));
+					       adc_get_accuracy(ADC_SampleTime, false));
 					
 					ADC_AnalogWatchdog1ThresholdsConfig(ADC1, 4095, ad_vbat - AD_DecMin);
 					ADC_AnalogWatchdogCmd(ADC1, ADC_AnalogWatchdog_SingleRegEnable);
