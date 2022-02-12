@@ -1,35 +1,30 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <math.h>
 
 //Add preprocessor symbols: USE_STDPERIPH_DRIVER, DEBUG
 #include <stm32f30x.h>
 
 #define VRefInt (1510.0 / 4095.0 * 3.3)
-static float ad_vrefint = 1.2 * 4095.0 / 3.3; //it will be updated
+float ad_vrefint = 1.2 * 4095.0 / 3.3; //it will be updated
 #define adc_to_voltage(ad_val) (VRefInt * ad_val/ad_vrefint)
 
 #define GPIO_ADC GPIOA
 #define RCC_AHBPeriph_GPIO_ADC RCC_AHBPeriph_GPIOA
 #define GPIO_Pin_ADC GPIO_Pin_1
 #define ADC_Channel_Bat ADC_Channel_2
-
-#define ADC_SampleTime_Bat ADC_SampleTime_61Cycles5
+#define ADC_SampleTime ADC_SampleTime_61Cycles5
+#define ADC_Diff_Tol 96 //for distinguishing of connected and floating states
 
 #define VBatMin 0.8
 #define VDecMin 0.05
 #define AD_BatMin (4096.0 * VBatMin / 3.3)
 #define AD_DecMin (4096.0 * VDecMin / 3.3)
 
-#define ADC_Cnt_Per_Watch 100
-#define ADC_Cnt_Av_Watch 10
-
-#define ADC_Cnt_Per_Check 8
-#define ADC_Cnt_Measure 36
-#define ADC_Cnt_Av_Out 18
-
-#define ADC_Buffer_Size (15 * ADC_Cnt_Measure)
-#define Capture_Buffer_Size (30 * ADC_Buffer_Size)
+#define ADC_Output_Cnt 128
+#define ADC_Av_Cnt 32
+#define ADC_Buffer_Size (ADC_Output_Cnt * ADC_Av_Cnt)
 
 typedef enum {
 	Measure_Disconnected = 0,
@@ -38,26 +33,21 @@ typedef enum {
 	Measure_Later
 } Measure_State;
 
-static volatile uint32_t TickCount = 0; //SysTick
-static volatile uint32_t TimingDelay;
+volatile Measure_State st = Measure_Disconnected;
 
-static volatile float watch_vadc = 0;
+volatile uint32_t TickCount = 0; //SysTick
+volatile uint32_t TimingDelay;
 
-static inline float get_average(uint16_t* raw_data, uint16_t cnt)
-{
-	uint32_t sum = 0;
-	for (uint16_t i = 0; i < cnt; i++)
-		sum += raw_data[i];
-	return (float)sum / cnt;
-}
+volatile uint16_t buf[ADC_Buffer_Size];
+volatile float av[ADC_Output_Cnt];
 
-// Remove 2 * bound extreme values. cnt should not exceed 0x200.
+// cnt should not exceed 0x200.
 // Returns 0 if the difference between the min and max values
 // of the remaining data is still larger than diff_max.
-static float get_stable_average(uint16_t* raw_data, uint16_t cnt, uint16_t bound, float diff_max)
+static float get_average(uint16_t* raw_data, uint16_t cnt, float diff_max)
 {
 	if (cnt == 0) return 0;
-	if (bound * 2 >= cnt) bound = 0;
+	uint16_t bound = cnt / 4;
 	
 	static uint16_t data[0x200]; uint32_t sum = 0;
 	
@@ -84,7 +74,7 @@ static float get_stable_average(uint16_t* raw_data, uint16_t cnt, uint16_t bound
 			}
 		}
 		
-		if (i == bound) break; //after breaking, tmin and tmax are values of remaining data
+		if (i == bound) break; //at the time tmin and tmax are of the remaining data
 		sum -= data[tmin]; sum -= data[tmax];
 		cnt_rem -= 2;
 		
@@ -95,7 +85,23 @@ static float get_stable_average(uint16_t* raw_data, uint16_t cnt, uint16_t bound
 	return (float)sum / cnt_rem;
 }
 
-static void SysTick_Init()
+float get_diff_average(float* data, uint16_t cnt)
+{
+	if (cnt == 0) return 0;
+	
+	float av = 0;
+	for (uint16_t i = 0; i < cnt; i++)
+		av += data[i];
+	av /= cnt;
+	
+	float sum_diff = 0;
+	for (uint16_t i = 0; i < cnt; i++)
+		sum_diff += fabs(data[i] - av);
+	
+	return sum_diff / cnt;
+}
+
+void SysTick_Init()
 {
 	// Setup SysTick Timer for 1 msec interrupts.
 	// Reload Value = SysTick Counter Clock (Hz) x  Desired Time base (s)
@@ -113,7 +119,7 @@ static void SysTick_Init()
 	NVIC_Init(&NVIC_InitStructure);
 }
 
-static inline void Delay(volatile uint32_t nTime)
+void Delay(volatile uint32_t nTime)
 { 
   TimingDelay = nTime;
   while (TimingDelay > 0);
@@ -122,21 +128,15 @@ static inline void Delay(volatile uint32_t nTime)
 void SysTick_Handler(void)
 {
 	TickCount++;
-	
-	if (TimingDelay > 0)
-		TimingDelay--;
+	if (TimingDelay > 0) TimingDelay--;
 }
 
-static void adc_init()
+void adc_init()
 {
-	GPIO_InitTypeDef GPIO_InitStruct;
-	ADC_CommonInitTypeDef ADC_CommonInitStruct;
-	ADC_InitTypeDef ADC_InitStruct;
-	uint32_t calibration_value = 0;
-	
 	RCC_ADCCLKConfig(RCC_ADC12PLLCLK_Div2);
 	RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIO_ADC | RCC_AHBPeriph_ADC12, ENABLE);
 	
+	GPIO_InitTypeDef GPIO_InitStruct;
 	GPIO_InitStruct.GPIO_Pin = GPIO_Pin_ADC;
 	GPIO_InitStruct.GPIO_Mode = GPIO_Mode_AN;
 	GPIO_InitStruct.GPIO_PuPd = GPIO_PuPd_NOPULL;
@@ -146,9 +146,10 @@ static void adc_init()
 	Delay(10);
 	ADC_SelectCalibrationMode(ADC1, ADC_CalibrationMode_Single);
 	ADC_StartCalibration(ADC1);
-	while(ADC_GetCalibrationStatus(ADC1) != RESET);
-	calibration_value = ADC_GetCalibrationValue(ADC1);
+	while (ADC_GetCalibrationStatus(ADC1) != RESET);
+	ADC_GetCalibrationValue(ADC1);
 	
+	ADC_CommonInitTypeDef ADC_CommonInitStruct;
 	ADC_CommonStructInit(&ADC_CommonInitStruct);
 	ADC_CommonInitStruct.ADC_Mode = ADC_Mode_Independent;
 	ADC_CommonInitStruct.ADC_Clock = ADC_Clock_AsynClkMode; //PLL->Prescaler->ADC, not from AHB HCLK
@@ -156,6 +157,7 @@ static void adc_init()
 	ADC_CommonInitStruct.ADC_TwoSamplingDelay = 0;
 	ADC_CommonInit(ADC1, &ADC_CommonInitStruct);
 	
+	ADC_InitTypeDef ADC_InitStruct;
 	ADC_StructInit(&ADC_InitStruct);
 	ADC_InitStruct.ADC_ContinuousConvMode = ADC_ContinuousConvMode_Enable; //continuous mode
 	ADC_InitStruct.ADC_Resolution = ADC_Resolution_12b;
@@ -165,36 +167,20 @@ static void adc_init()
 	ADC_InitStruct.ADC_NbrOfRegChannel = 1;
 	ADC_Init(ADC1, &ADC_InitStruct);
 	
-	ADC_TempSensorCmd(ADC1, ENABLE); //16 temperature sensor
 	ADC_VrefintCmd(ADC1, ENABLE); //18 VRefInt
-	ADC_VbatCmd(ADC1, ENABLE); //17 VBAT
+	
+	NVIC_InitTypeDef NVIC_InitStruct;
+	NVIC_InitStruct.NVIC_IRQChannel = ADC1_2_IRQn;
+	NVIC_InitStruct.NVIC_IRQChannelPreemptionPriority = 1;
+	NVIC_InitStruct.NVIC_IRQChannelSubPriority = 0;
+	NVIC_InitStruct.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&NVIC_InitStruct);
+	
+	ADC_AnalogWatchdog1SingleChannelConfig(ADC1, ADC_Channel_Bat);
+	ADC_ITConfig(ADC1, ADC_IT_AWD1, ENABLE);
 	
 	ADC_Cmd(ADC1, ENABLE);
 	while (! ADC_GetFlagStatus(ADC1, ADC_FLAG_RDY));
-}
-
-static void adc_get_refint(void)
-{
-	const uint16_t times = 0x80;
-	static uint16_t raw_data[0x80];
-	
-	ADC_RegularChannelConfig(ADC1, ADC_Channel_18, 1, ADC_SampleTime_181Cycles5);
-	
-	ADC1->ISR &= ~ADC_FLAG_EOC;
-	ADC_StartConversion(ADC1);
-	
-	while ((ADC1->ISR & ADC_FLAG_EOC) == RESET);
-	raw_data[0] = ADC1->DR; //skip the first data that might be invalid
-	
-	for (uint8_t i = 0; i < times; i++) {
-		while ((ADC1->ISR & ADC_FLAG_EOC) == RESET);
-		raw_data[i] = ADC1->DR; //reading DR register clears the EOC flag
-	}
-	
-	ADC_StopConversion(ADC1);
-	while (ADC1->CR & ADC_CR_ADSTP);
-	
-	ad_vrefint = get_stable_average(raw_data, times, times / 4, 32);
 }
 
 static inline void adc_discard_one() //skip the first data that might be invalid
@@ -203,120 +189,171 @@ static inline void adc_discard_one() //skip the first data that might be invalid
 	ADC1->DR;
 }
 
+float adc_read_accurate(uint8_t channel)
+{
+	const uint16_t times = 0x80;
+	static uint16_t raw_data[0x80];
+	
+	ADC_RegularChannelConfig(ADC1, channel, 1, ADC_SampleTime_181Cycles5);
+	ADC1->ISR &= ~ADC_FLAG_EOC;
+	ADC_StartConversion(ADC1); adc_discard_one();
+	
+	for (uint8_t i = 0; i < times; i++) {
+		while ((ADC1->ISR & ADC_FLAG_EOC) == RESET);
+		raw_data[i] = ADC1->DR; //reading DR register clears the EOC flag
+	}
+	
+	ADC_StopConversion(ADC1); while (ADC1->CR & ADC_CR_ADSTP);
+	return get_average(raw_data, times, ADC_Diff_Tol);
+}
+
+float adc_get_freq(uint8_t adc_sampletime)
+{
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_Bat, 1, adc_sampletime);
+	ADC_StartConversion(ADC1);
+	
+	uint32_t cnt = 0;
+	TickCount = 0; //SysTick
+	while (TickCount < 300) {
+		while ((ADC1->ISR & ADC_FLAG_EOC) == RESET);
+		ADC1->DR; cnt++;
+	}
+	
+	ADC_StopConversion(ADC1); while (ADC1->CR & ADC_CR_ADSTP);
+	return (float)cnt / 300.0; //kHz
+}
+
+float adc_get_accuracy(uint8_t adc_sampletime, bool get_worst)
+{
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_Bat, 1, adc_sampletime);
+	ADC_StartConversion(ADC1); adc_discard_one();
+	
+	for (uint16_t i = 0; i < ADC_Buffer_Size; i++) {
+		while ((ADC1->ISR & ADC_FLAG_EOC) == RESET);
+		buf[i] = ADC1->DR;
+	}
+	
+	ADC_StopConversion(ADC1); while (ADC1->CR & ADC_CR_ADSTP);
+	
+	for (uint16_t i = 0; i < ADC_Output_Cnt; i++)
+		av[i] = get_average(buf + i * ADC_Av_Cnt, ADC_Av_Cnt, ADC_Diff_Tol);
+	
+	float diff;
+	if (get_worst)
+		diff = get_diff_max(av, ADC_Output_Cnt);
+	else
+		diff = get_diff_average(av, ADC_Output_Cnt);
+	
+	return 12.0 - log(diff) / log(2);
+}
+
+void ADC1_2_IRQHandler(void)
+{
+	if (ADC_GetITStatus(ADC1, ADC_IT_AWD1) != RESET) {
+		ADC_ClearITPendingBit(ADC1, ADC_IT_AWD1);
+		if (st == Measure_Connected) {
+			ADC_StopConversion(ADC1); while ((ADC1->CR & ADC_CR_ADSTP) != RESET);
+			ADC_AnalogWatchdogCmd(ADC1, ADC_AnalogWatchdog_None);
+			ADC_StartConversion(ADC1); adc_discard_one();
+			st = Measure_Capturing;
+		}
+	}
+}
+
 int main(void)
 {
 	NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
 	SysTick_Init();
+	adc_init(); ad_vrefint = adc_read_accurate(ADC_Channel_18);
 	
-	adc_init();
-	adc_get_refint();
-	ADC_RegularChannelConfig(ADC1, ADC_Channel_Bat, 1, ADC_SampleTime_Bat);
-	ADC_StartConversion(ADC1);
-	adc_discard_one();
+	float freq = adc_get_freq(ADC_SampleTime);
+	printf("Current ADC Read Frequency: %.3f kHz.\nInterval of output data will be: %.3f us.\n",
+	       freq, 1000.0 / (freq / ADC_Av_Cnt));
 	
-	static uint16_t buf[ADC_Buffer_Size]; uint16_t ibuf = 0;
-	static uint16_t cap[Capture_Buffer_Size]; uint16_t icap = 0;
-	Measure_State st = Measure_Disconnected;
-	bool flag_refresh_vbat = true;
-	bool flag_measure_read_freq = true; uint32_t cntf = 0;
-	float ad_vbat = 0, ad_vbat_load = 0;
-	TickCount = 0; //SysTick
+	float ad_vbat = 0, vbat = 0;
+	float vbat_dec = 0;
+	uint16_t dcnt = 0;
 	
 	while (true) {
-		while ((ADC1->ISR & ADC_FLAG_EOC) == RESET);
-		buf[ibuf] = ADC1->DR;
-		
-		if (buf[ibuf] == 0 || buf[ibuf] >= 4095)
-			continue; //invalid data, it shouldn't happen, set breakpoint here
-		
-		if (flag_measure_read_freq) {
-			cntf++;
-			if (TickCount >= 100) { //100 ms
-				cntf *= 10; //count per second
-				printf("Current ADC Sampling Frequency: %f kHz\n", (float)cntf / 1000.0);
-				printf("Voltage drop capturing span will be about %d us,\n",
-				       (uint16_t)((ADC_Cnt_Per_Check + ADC_Cnt_Measure) / ((float)cntf / 1000.0 / 1000.0)));
-				printf("interval of output data will be %d us.\n\n",
-				       (uint16_t)(ADC_Cnt_Av_Out * 1000.0 * 1000.0 / (float)cntf));
-				flag_measure_read_freq = false;
-			}
-		}
-		
-		if (ibuf > 0 && (ibuf + 1) % ADC_Cnt_Per_Watch == 0) {
-			float v = adc_to_voltage(get_average(buf + ibuf - ADC_Cnt_Av_Watch + 1, ADC_Cnt_Av_Watch));
-			if (v >= 0.005 && v <= 3.3) { //valid
-				watch_vadc = v;
-				if (watch_vadc < VBatMin / 2.0)
-					st = Measure_Disconnected;
-			}
-		}
-		
-		if (st == Measure_Connected && ibuf > 0 && (ibuf + 1) % ADC_Cnt_Per_Check == 0) {
-			bool dec = true;
-			for (uint16_t i = ibuf; i > ibuf - 4; i--) //requires 4 data lower than original ad_vbat
-				if (buf[i] > ad_vbat || ad_vbat - buf[i] < AD_DecMin)
-					{dec = false; break;}
-			
-			if (dec) {
-				st = Measure_Capturing; flag_refresh_vbat = false;
-				icap = (ibuf + 1 < 2 * ADC_Cnt_Av_Out)? ibuf : (2 * ADC_Cnt_Av_Out - 1);
-				for (uint16_t i = 0; i <= icap; i++)
-					cap[i] = buf[i];
-				icap++;
-				ibuf = 0; continue;
-			}
-		}
-				
-		if (st == Measure_Capturing) {
-			cap[icap++] = buf[ibuf];
-			if (ibuf + 1 == ADC_Cnt_Measure) {
-				ad_vbat_load = get_stable_average(buf, ADC_Cnt_Measure, ADC_Cnt_Measure / 4, 16);
-				if (ad_vbat_load == 0.0) {ibuf = 0; continue;}
-				if (ad_vbat_load > ad_vbat || ad_vbat - ad_vbat_load < AD_DecMin) { //false trigger
-					st = Measure_Connected;
-					flag_refresh_vbat = true;
-					ibuf = 0; continue;
-				} else {
-					printf("vbat_load: %f\n", adc_to_voltage(ad_vbat_load));
-					st = Measure_Later;
-				}
-			}
-		}
-		else if (st == Measure_Later) {
-			if (icap < Capture_Buffer_Size)
-				cap[icap++] = buf[ibuf];
-			if (ibuf > 0 && (ibuf + 1) % ADC_Cnt_Measure == 0) {
-				float tmp = get_stable_average(buf + ibuf - ADC_Cnt_Measure + 1, ADC_Cnt_Measure, ADC_Cnt_Measure / 9, 8);
-				if (tmp > ad_vbat || ad_vbat - tmp < AD_DecMin / 4) {
-					for (uint16_t i = 0; i + ADC_Cnt_Av_Out < icap; i += ADC_Cnt_Av_Out) {
-						printf("%f ", adc_to_voltage(get_stable_average(cap + i, ADC_Cnt_Av_Out, ADC_Cnt_Av_Out / 4, 32)));
-						Delay(5);
-					}
-					printf("\n\n");
-					
-					st = Measure_Connected;
-					flag_refresh_vbat = true;
-				}
-			}
-		}
-		
-		if (ibuf + 1 == ADC_Buffer_Size) {
-			if (st == Measure_Disconnected || flag_refresh_vbat) {
-				ad_vbat = get_stable_average(buf + ibuf - ADC_Cnt_Measure + 1, ADC_Cnt_Measure, ADC_Cnt_Measure / 4, 32);
+		switch (st) {
+			case Measure_Disconnected:
+				ad_vbat = adc_read_accurate(ADC_Channel_Bat);
 				if (ad_vbat >= AD_BatMin) {
-					if (st == Measure_Disconnected) {
-						st = Measure_Connected;
-						flag_refresh_vbat = true; //measure again
+					st = Measure_Connected;
+					Delay(100);
+					ad_vbat = adc_read_accurate(ADC_Channel_Bat);
+					vbat = adc_to_voltage(ad_vbat);
+					printf("Connected. Battery Voltage: %.3f V.\n", vbat);
+					printf("ADC Accuracy: %.3f ~ %.3f Bits.\n\n",
+					       adc_get_accuracy(ADC_SampleTime, true),
+						   adc_get_accuracy(ADC_SampleTime, false));
+					
+					ADC_AnalogWatchdog1ThresholdsConfig(ADC1, 4095, ad_vbat - AD_DecMin);
+					ADC_AnalogWatchdogCmd(ADC1, ADC_AnalogWatchdog_SingleRegEnable);
+					
+					ADC_RegularChannelConfig(ADC1, ADC_Channel_Bat, 1, ADC_SampleTime);
+					ADC_StartConversion(ADC1); adc_discard_one();
+				}
+				break;
+			
+			case Measure_Connected: break; //rely on the watchdog
+
+			case Measure_Capturing:
+				for (uint16_t i = 0; i < ADC_Buffer_Size; i++) {
+					while ((ADC1->ISR & ADC_FLAG_EOC) == RESET);
+					buf[i] = ADC1->DR;
+				}
+				ADC_StopConversion(ADC1); while ((ADC1->CR & ADC_CR_ADSTP) != RESET);
+				ADC_AnalogWatchdogCmd(ADC1, ADC_AnalogWatchdog_None);
+				st = Measure_Later;
+				
+				for (uint16_t i = 0; i < ADC_Output_Cnt; i++)
+					av[i] = adc_to_voltage(get_average(buf + i * ADC_Av_Cnt, ADC_Av_Cnt, ADC_Diff_Tol));
+				
+				vbat_dec = av[1]; //second item
+				if (vbat - vbat_dec < VDecMin) { //false trigger
+					ADC_AnalogWatchdogCmd(ADC1, ADC_AnalogWatchdog_SingleRegEnable);
+					st = Measure_Connected; ADC_StartConversion(ADC1);
+					break;
+				} else if (vbat_dec < VBatMin) { //disconnect event
+					if (av[ADC_Output_Cnt - 1] < VBatMin) {
+						st = Measure_Disconnected;
+						printf("Disconnected.\n\n");
 					} else {
-						flag_refresh_vbat = false;
-						printf("vbat: %f\n\n", adc_to_voltage(ad_vbat));
+						ADC_AnalogWatchdogCmd(ADC1, ADC_AnalogWatchdog_SingleRegEnable);
+						st = Measure_Connected; ADC_StartConversion(ADC1);
 					}
-				} else
-					st = Measure_Disconnected;
-			}
-			ibuf = 0; continue;
+					break;
+				}
+				
+				printf("Captured: %.3f V. Voltage Drop: %.3f V\n", vbat_dec, vbat - vbat_dec); Delay(5);
+				for (uint16_t i = 0; i < ADC_Output_Cnt; i++) {
+					printf("%.4f ", av[i]); Delay(5);
+				}
+				printf("\n\n");
+				break;
+			
+			case Measure_Later:
+				vbat_dec = adc_to_voltage(adc_read_accurate(ADC_Channel_Bat));
+				if (vbat - vbat_dec < VDecMin / 4) {
+					st = Measure_Connected; dcnt = 0;
+					Delay(100);
+					ad_vbat = adc_read_accurate(ADC_Channel_Bat);
+					vbat = adc_to_voltage(ad_vbat);
+					printf("Battery Voltage: %.3f V.\n\n", vbat);
+					
+					ADC_AnalogWatchdog1ThresholdsConfig(ADC1, 4095, ad_vbat - AD_DecMin);
+					ADC_AnalogWatchdogCmd(ADC1, ADC_AnalogWatchdog_SingleRegEnable);
+					ADC_StartConversion(ADC1); adc_discard_one();
+				} else if (vbat_dec < VBatMin) {
+					dcnt++;
+					if (dcnt >= 3) {
+						st = Measure_Disconnected; dcnt = 0;
+						printf("Disconnected.\n\n");
+					}
+				} else dcnt = 0;
+				break;
 		}
-		ibuf++;
 	}
 }
 
@@ -328,7 +365,7 @@ extern void assert_param(uint8_t expr)
 #endif
 }
 
-extern int fputc (int c, FILE* stream)
+extern int fputc(int c, FILE* stream)
 {
 	ITM_SendChar(c);
 	return -1;
