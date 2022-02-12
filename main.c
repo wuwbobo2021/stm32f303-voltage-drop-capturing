@@ -85,6 +85,20 @@ static float get_average(uint16_t* raw_data, uint16_t cnt, float diff_max)
 	return (float)sum / cnt_rem;
 }
 
+float get_diff_max(float* data, uint16_t cnt)
+{
+	if (cnt == 0) return 0;
+	
+	float max = -UINT16_MAX, min = UINT16_MAX;
+	float d = 0;
+	for (uint16_t i = 0; i < cnt; i++) {
+		if (data[i] > max) max = data[i];
+		if (data[i] < min) min = data[i];
+	}
+	
+	return (max - min) / 2;
+}
+
 float get_diff_average(float* data, uint16_t cnt)
 {
 	if (cnt == 0) return 0;
