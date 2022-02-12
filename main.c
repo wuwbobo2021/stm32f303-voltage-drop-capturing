@@ -310,7 +310,13 @@ int main(void)
 				for (uint16_t i = 0; i < ADC_Output_Cnt; i++)
 					av[i] = adc_to_voltage(get_average(buf + i * ADC_Av_Cnt, ADC_Av_Cnt, ADC_Diff_Tol));
 				
-				vbat_dec = av[1]; //second item
+				vbat_dec = 0;
+				for (uint16_t i = 1; i < ADC_Output_Cnt; i++) {
+					if (av[i] > 0) {
+						vbat_dec = av[i]; break;
+					}
+				}
+				
 				if (vbat - vbat_dec < VDecMin) { //false trigger
 					ADC_AnalogWatchdogCmd(ADC1, ADC_AnalogWatchdog_SingleRegEnable);
 					st = Measure_Connected; ADC_StartConversion(ADC1);
