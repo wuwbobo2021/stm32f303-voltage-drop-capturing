@@ -194,9 +194,7 @@ static void adc_get_refint(void)
 	ADC_StopConversion(ADC1);
 	while (ADC1->CR & ADC_CR_ADSTP);
 	
-	ad_vrefint = 0;
-	while (ad_vrefint == 0.0)
-		ad_vrefint = get_stable_average(raw_data, times, times / 4, 8);
+	ad_vrefint = get_stable_average(raw_data, times, times / 4, 32);
 }
 
 static inline void adc_discard_one() //skip the first data that might be invalid
