@@ -2,7 +2,7 @@
 A small attempt to evaluate AC internal resistance of the battery. Currently without current measuring.
 
 ## Description
-Tested under STM32F3Discovery development board.
+Tested on STM32F3Discovery development board.
 
 Battery voltage input pin is currently configured as PA1, which is a 3.3 V pin. Minimum voltage drop that can be captured is defined by macro `VDecMin`.
 
