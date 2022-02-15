@@ -177,7 +177,7 @@ void adc_init()
 	ADC_InitStruct.ADC_Resolution = ADC_Resolution_12b;
 	ADC_InitStruct.ADC_DataAlign = ADC_DataAlign_Right;
 	ADC_InitStruct.ADC_AutoInjMode = ADC_AutoInjec_Disable;
-	ADC_InitStruct.ADC_OverrunMode = ADC_OverrunMode_Disable;
+	ADC_InitStruct.ADC_OverrunMode = ADC_OverrunMode_Enable;
 	ADC_InitStruct.ADC_NbrOfRegChannel = 1;
 	ADC_Init(ADC1, &ADC_InitStruct);
 	
