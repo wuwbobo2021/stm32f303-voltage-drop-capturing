@@ -9,5 +9,6 @@ extern void assert_param(uint8_t expr);
 #include <stm32f30x_rcc.h>
 #include <stm32f30x_gpio.h>
 #include <stm32f30x_adc.h>
+#include <stm32f30x_dma.h>
 
 #endif
