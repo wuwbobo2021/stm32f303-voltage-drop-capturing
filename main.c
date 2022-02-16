@@ -1,3 +1,5 @@
+// by wuwbobo2021 <https://github.com/wuwbobo2021>, <wuwbobo@outlook.com>
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -232,7 +234,7 @@ static inline void adc_stop(ADC_TypeDef* ADCx)
 	ADC_StopConversion(ADCx); while (ADCx->CR & ADC_CR_ADSTP);
 }
 
-//cost at least 6.8 ms under 12 MHz ADC Frequency, 7Cycles5 sample time
+//time cost is above 7 ms under 12 MHz ADC Frequency, 7Cycles5 sample time
 float adc_read_average(ADC_TypeDef* ADCx)
 {
 	DMA_Channel_TypeDef* DMA_Channel; uint32_t DMA_IT_TC1;
@@ -251,7 +253,12 @@ float adc_read_average(ADC_TypeDef* ADCx)
 	adc_stop(ADCx);
 	DMA_Cmd(DMA_Channel, DISABLE);
 	DMA_ClearITPendingBit(DMA_IT_TC1);
-	return get_average((ADCx == ADC1)? buf : buf_ref, ADC_Buffer_Size, ADC_Diff_Tol);
+	
+	uint16_t* pdata = (ADCx == ADC1)? buf : buf_ref;
+	float sum = 0;
+	for (uint16_t i = 0; i < ADC_Output_Cnt; i++)
+		sum += get_average(pdata + i * ADC_Av_Cnt, ADC_Av_Cnt, ADC_Diff_Tol);
+	return sum / ADC_Output_Cnt;
 }
 
 void adc_overall_init(void)
@@ -324,8 +331,22 @@ void adc_get_accuracy(uint8_t adc_sampletime, float* acc_worst, float* acc_av)
 	for (uint16_t i = 0; i < ADC_Output_Cnt; i++)
 		av[i] = get_average(buf + i * ADC_Av_Cnt, ADC_Av_Cnt, ADC_Diff_Tol);
 	
-	*acc_worst = 12.0 - log(get_diff_max(av, ADC_Output_Cnt)) / log(2);
-	*acc_av = 12.0 - log(get_diff_average(av, ADC_Output_Cnt)) / log(2);
+	// fill in empty items corresponding with data discarded by get_average(), ADC_Diff_Tol.
+	// these zero outputs have no influrence on accuracy, don't pass them to get_diff().
+	float fill = 0; uint16_t i = 0;
+	while (i < ADC_Av_Cnt) {
+		if (fill == 0) {
+			if (av[i] != 0) {
+				fill = av[i]; i = 0; continue; //get first non-zero item
+			}
+		} else {
+			if (av[i] == 0) av[i] = fill;
+		}
+		i++;
+	}
+	
+	*acc_worst = 12.0 - log(get_diff_max(av, 16)) / log(2);
+	*acc_av = 12.0 - log(get_diff_average(av, 16)) / log(2);
 }
 
 int main(void)
