@@ -360,7 +360,7 @@ int main(void)
 	
 	float freq = adc_get_freq();
 	printf("Current ADC Frequency: %d kHz.\n", (uint16_t) freq);
-	printf("Capturing will start about %.1f us after the actual drop,\n", Dec_Cnt_Min * 1000.0 / freq);
+	printf("Capturing will start about %.1f us after the voltage drop,\n", Dec_Cnt_Min * 1000.0 / freq);
 	printf("Interval (time cost) of each output data will be: %.1f us.\n", ADC_Sample_Cnt * 1000.0 / freq);
 	
 	float ad_vbat = 0, vbat = 0;
@@ -379,7 +379,7 @@ int main(void)
 					
 					st = Measure_Connected;
 					vbat = adc_to_voltage(ad_vbat);
-					printf("Connected. Battery Voltage: %.4f V (%d).\n", vbat, (uint16_t)ad_vbat);
+					printf("Connected. Battery Voltage: %.4f V (%d / 4095).\n", vbat, (uint16_t)ad_vbat);
 					
 					float acc_av, acc_worst;
 					adc_get_accuracy(ADC_SampleTime_Default, &acc_worst, &acc_av);
