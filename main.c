@@ -1,5 +1,6 @@
 //by wuwbobo2021 <https://github.com/wuwbobo2021>, <wuwbobo@outlook.com>
 
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -15,18 +16,18 @@ float ad_vrefint = 1.2 * 4095.0 / 3.3; //it will be updated
 #define RCC_AHBPeriph_GPIO_ADC RCC_AHBPeriph_GPIOA
 #define GPIO_Pin_ADC GPIO_Pin_1
 #define ADC_SampleTime_Default ADC_SampleTime_7Cycles5
-#define ADC_Diff_Tol 96 //for distinguishing of connected and floating states
+#define ADC_Diff_Tol 6 //the valid span of samplings is set to [av - ADC_Diff_Tol, av + ADC_Diff_Tol]
 #define ADC_Channel_Bat ADC_Channel_2 //PA1
 
 #define VBatMin 0.8
-#define VDecMin 0.05
-#define AD_BatMin (4096.0 * VBatMin / 3.3)
-#define AD_DecMin (4096.0 * VDecMin / 3.3)
+#define VDecMin 0.05 //minimal voltage drop that can be captured by this program
+#define AD_BatMin (4095.0 * VBatMin / 3.3)
+#define AD_DecMin (4095.0 * VDecMin / 3.3)
 #define Dec_Cnt_Min 4
 
-#define ADC_Output_Cnt 128
-#define ADC_Av_Cnt 32
-#define ADC_Buffer_Size (ADC_Output_Cnt * ADC_Av_Cnt)
+#define ADC_Av_Cnt 128 //amount of average values that can obtain from buffer size of raw data
+#define ADC_Sample_Cnt 32 //amount of raw data per average value
+#define ADC_Buffer_Size (ADC_Av_Cnt * ADC_Sample_Cnt)
 
 typedef enum {
 	Measure_Disconnected = 0,
@@ -40,51 +41,65 @@ volatile Measure_State st = Measure_Disconnected;
 volatile uint32_t TickCount = 0, TimingDelay = 0; //SysTick
 
 volatile uint16_t buf[2 * ADC_Buffer_Size];
-volatile float av[ADC_Output_Cnt];
+volatile float av[ADC_Av_Cnt];
 
-// Raw data will be broken by this function.
-// Return 0 if the difference between the min and max values
-// of the remaining data is still larger than diff_max.
-static float get_average(uint16_t* raw_data, uint16_t cnt, float diff_max)
+float get_average(volatile uint16_t* raw_data, uint16_t cnt, float diff_max)
 {
-	if (cnt == 0) return 0;
-	uint16_t bound = cnt / 4;
+	// get the reference average. (without influence of extreme values)
 	
+	uint16_t* data = malloc(cnt * sizeof(uint16_t));
 	uint32_t sum = 0;
-	for (uint16_t i = 0; i < cnt; i++)
+	for (uint16_t i = 0; i < cnt; i++) {
+		data[i] = raw_data[i];
 		sum += raw_data[i];
+	}
 	
+	uint16_t border = cnt / 8; //2*border items will be removed 
 	uint16_t cnt_rem = cnt;
-	uint16_t umin = 0, umax = 0;
-	uint16_t tmin, tmax;
-	for (uint16_t i = 0; i < bound + 1; i++) {
-		umin = UINT16_MAX; umax = 0;
+	uint16_t curr_min = 0, curr_max = 0;
+	uint16_t pmin, pmax;
+	for (uint16_t i = 0; i <= border; i++) {
+		curr_min = UINT16_MAX; curr_max = 0;
 		
 		for (uint16_t j = 0; j < cnt; j++) {
-			if (raw_data[j] == UINT16_MAX) continue;
-			if (raw_data[j] < umin) {
-				tmin = j;
-				umin = raw_data[j];
+			if (data[j] == UINT16_MAX) continue;
+			if (data[j] < curr_min) {
+				pmin = j;
+				curr_min = data[j];
 			}
-			if (raw_data[j] > umax) {
-				tmax = j;
-				umax = raw_data[j];
+			if (data[j] > curr_max) {
+				pmax = j;
+				curr_max = data[j];
 			}
 		}
 		
-		if (i == bound) break; //at the time tmin and tmax are of the remaining data
-		sum -= raw_data[tmin]; sum -= raw_data[tmax];
+		if (i == border) break; //at the time curr_min and curr_max are of the remaining data
+		sum -= raw_data[pmin]; sum -= raw_data[pmax];
 		cnt_rem -= 2;
 		
-		raw_data[tmin] = raw_data[tmax] = UINT16_MAX;
+		data[pmin] = data[pmax] = UINT16_MAX;
 	}
+	free(data);
 	
-	if (umax - umin > diff_max) 
-		return 0;
-	return (float)sum / cnt_rem;
+	if ((curr_max - curr_min) / 2 > 8 * diff_max) return 0; //invalid data
+	float av1 = (float)sum / cnt_rem;
+	
+	// set the over sampling boundary depending on the reference average calculated above.
+	
+	float av2 = 0;
+	sum = 0; cnt_rem = 0;
+	for (uint16_t i = 0; i < cnt; i++) {
+		if (fabs(raw_data[i] - av1) <= diff_max) {
+			sum += raw_data[i];
+			cnt_rem++;
+		}
+	}
+	if (cnt_rem == 0) return 0;
+	av2 = (float)sum / cnt_rem;
+	return av2;
 }
 
-float get_diff_max(float* data, uint16_t cnt)
+float get_diff_max(volatile float* data, uint16_t cnt)
 {
 	if (cnt == 0) return 0;
 	
@@ -97,7 +112,7 @@ float get_diff_max(float* data, uint16_t cnt)
 	return (max - min) / 2;
 }
 
-float get_diff_average(float* data, uint16_t cnt)
+float get_diff_average(volatile float* data, uint16_t cnt)
 {
 	if (cnt == 0) return 0;
 	
@@ -124,7 +139,7 @@ void SysTick_Init()
 		while (1); //Capture error 
 
 	NVIC_InitTypeDef NVIC_InitStructure;
-	NVIC_InitStructure.NVIC_IRQChannel = SysTick_IRQn;
+	NVIC_InitStructure.NVIC_IRQChannel = (uint8_t)SysTick_IRQn;
 	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
 	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
@@ -204,7 +219,12 @@ void adc_get_vrefint(void)
 	adc_dma_capture();
 	for (uint16_t i = 0; i < ADC_Buffer_Size; i++)
 		buf[i] = buf[2*i + 1];
-	ad_vrefint = get_average(buf, ADC_Buffer_Size, ADC_Diff_Tol);
+	
+	ad_vrefint = 0;
+	for (uint16_t i = 0; i < ADC_Av_Cnt; i++)
+		ad_vrefint += get_average(buf + i*ADC_Sample_Cnt, ADC_Sample_Cnt, ADC_Diff_Tol);
+	
+	ad_vrefint /= ADC_Av_Cnt;
 }
 
 static inline float adc_read(void) //when DMA is not running
@@ -223,11 +243,11 @@ float adc_read_average(void)
 		buf[i] = (uint16_t)((float)buf[2*i] * ad_vrefint / buf[2*i + 1]);
 	
 	float sum = 0;
-	for (uint16_t i = 0; i < ADC_Output_Cnt; i++) {
-		av[i] = get_average(buf + i*ADC_Av_Cnt, ADC_Av_Cnt, ADC_Diff_Tol);
+	for (uint16_t i = 0; i < ADC_Av_Cnt; i++) {
+		av[i] = get_average(buf + i*ADC_Sample_Cnt, ADC_Sample_Cnt, ADC_Diff_Tol);
 		sum += av[i];
 	}
-	return sum / ADC_Output_Cnt;
+	return sum / ADC_Av_Cnt;
 }
 
 static inline float adc_to_voltage(float ad_val)
@@ -254,7 +274,7 @@ float adc_get_freq(void) //cost 0.5 s
 		DMA_ClearITPendingBit(DMA1_IT_TC1);
 	}
 	
-	return (float)cnt / 500.0; //kHz
+	return (float)cnt / (float)500; //kHz
 }
 
 void adc_get_accuracy(uint8_t adc_sampletime, float* acc_worst, float* acc_av)
@@ -264,22 +284,18 @@ void adc_get_accuracy(uint8_t adc_sampletime, float* acc_worst, float* acc_av)
 	adc_start(); Delay(10);
 	adc_read_average();
 	
-	// fill in empty items corresponding with data discarded by get_average(), ADC_Diff_Tol.
-	// these zero outputs have no influrence on accuracy, don't pass them to get_diff().
-	float fill = 0; uint16_t i = 0;
-	while (i < ADC_Av_Cnt) {
-		if (fill == 0) {
-			if (av[i] != 0) {
-				fill = av[i]; i = 0; continue; //get first non-zero item
-			}
-		} else {
-			if (av[i] == 0) av[i] = fill;
+	// fill in empty items caused by bad data discarded by get_average() according to ADC_Diff_Tol.
+	// these zero outputs are very few, and they have no influrence on accuracy, don't pass them to get_diff.
+	float filler = 0;
+	for (uint16_t i = 0; i < ADC_Av_Cnt; i++)
+		if (av[i] != 0) {
+			filler = av[i]; break;
 		}
-		i++;
-	}
+	for (uint16_t i = 0; i < ADC_Av_Cnt; i++)
+		if (av[i] == 0) av[i] = filler;
 	
-	*acc_worst = 12.0 - log(get_diff_max(av, ADC_Output_Cnt)) / log(2);
-	*acc_av = 12.0 - log(get_diff_average(av, ADC_Output_Cnt)) / log(2);
+	*acc_worst = 12.0 - log(get_diff_max(av, ADC_Av_Cnt)) / log(2);
+	*acc_av = 12.0 - log(get_diff_average(av, ADC_Av_Cnt)) / log(2);
 }
 
 void adc_dma_init()
@@ -344,8 +360,8 @@ int main(void)
 	
 	float freq = adc_get_freq();
 	printf("Current ADC Frequency: %d kHz.\n", (uint16_t) freq);
-	printf("Capturing will start %.1f us after the actual drop,\n", Dec_Cnt_Min * 1000 / freq);
-	printf("Interval (time cost) of each output data will be: %.1f us.\n", ADC_Av_Cnt * 1000.0 / freq);
+	printf("Capturing will start about %.1f us after the actual drop,\n", Dec_Cnt_Min * 1000.0 / freq);
+	printf("Interval (time cost) of each output data will be: %.1f us.\n", ADC_Sample_Cnt * 1000.0 / freq);
 	
 	float ad_vbat = 0, vbat = 0;
 	uint16_t ad_curr;
@@ -363,7 +379,7 @@ int main(void)
 					
 					st = Measure_Connected;
 					vbat = adc_to_voltage(ad_vbat);
-					printf("Connected. Battery Voltage: %.3f V.\n", vbat);
+					printf("Connected. Battery Voltage: %.4f V (%d).\n", vbat, (uint16_t)ad_vbat);
 					
 					float acc_av, acc_worst;
 					adc_get_accuracy(ADC_SampleTime_Default, &acc_worst, &acc_av);
@@ -378,7 +394,7 @@ int main(void)
 				
 				if (ad_curr < AD_BatMin) {
 					dis_cnt++; dec_cnt = 0;
-					if (dis_cnt >= 2 * ADC_Av_Cnt) {
+					if (dis_cnt >= 2 * ADC_Sample_Cnt) {
 						st = Measure_Disconnected; dis_cnt = 0;
 						printf("Disconnected.\n\n");
 					}
@@ -396,7 +412,7 @@ int main(void)
 				adc_read_average(); st = Measure_Later;
 				
 				vbat_dec = 0;
-				for (uint16_t i = 1; i < ADC_Output_Cnt; i++) {
+				for (uint16_t i = 1; i < ADC_Av_Cnt; i++) {
 					if (av[i] > 0) {
 						vbat_dec = adc_to_voltage(av[i]); break;
 					}
@@ -405,7 +421,7 @@ int main(void)
 					st = Measure_Connected; adc_start();
 					break;
 				} else if (vbat_dec < VBatMin) { //disconnect event
-					if (av[ADC_Output_Cnt - 1] < VBatMin) {
+					if (av[ADC_Av_Cnt - 1] < VBatMin) {
 						st = Measure_Disconnected;
 						printf("Disconnected.\n\n");
 					} else {
@@ -415,7 +431,7 @@ int main(void)
 				}
 				
 				printf("Captured: %.3f V. Voltage Drop: %.3f V\n", vbat_dec, vbat - vbat_dec); Delay(5);
-				for (uint16_t i = 0; i < ADC_Output_Cnt; i++) {
+				for (uint16_t i = 0; i < ADC_Av_Cnt; i++) {
 					printf("%.4f ", adc_to_voltage(av[i])); Delay(5);
 				}
 				printf("\n\n");
@@ -428,7 +444,7 @@ int main(void)
 					Delay(2000);
 					ad_vbat = adc_read_average();
 					vbat = adc_to_voltage(ad_vbat);
-					printf("Battery Voltage: %.3f V.\n\n", vbat);
+					printf("Battery Voltage: %.4f V.\n\n", vbat);
 					
 					adc_start();
 				} else if (ad_curr < AD_BatMin) {
