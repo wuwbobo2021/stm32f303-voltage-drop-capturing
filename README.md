@@ -16,4 +16,3 @@ To test the program, make sure that PB3 is connected to TRACESWO of the debug in
 ## Known Problems
 1. Plugging in the PC's power adapter might have serious impact on ADC accuracy.
 2. The debug session might have effect on ADC readings. it has no significant influence on the result, though.
-3. The reference voltage reading value (which is used in converting ADC values to volts) wouldn't be updated since the program has started. It might produce error if the voltage of power supply (VDDA) changes significantly after the program has started.
