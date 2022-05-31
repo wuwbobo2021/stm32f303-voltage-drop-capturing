@@ -312,7 +312,8 @@ void adc_dma_init()
 	ADC_CommonStructInit(&ADC_CommonInitStruct);
 	ADC_CommonInitStruct.ADC_Mode = ADC_Mode_RegSimul; //ADC Dual Mode, regular simultaneous mode
 	ADC_CommonInitStruct.ADC_Clock = ADC_Clock_AsynClkMode; //PLL->Prescaler->ADC, not from AHB HCLK
-	ADC_CommonInitStruct.ADC_DMAAccessMode = ADC_DMAAccessMode_Disabled;
+	ADC_CommonInitStruct.ADC_DMAAccessMode = ADC_DMAAccessMode_1; //DMA mode enabled for 12 and 10-bit resolution
+	ADC_CommonInitStruct.ADC_DMAMode = ADC_DMAMode_OneShot;
 	ADC_CommonInitStruct.ADC_TwoSamplingDelay = 0;
 	ADC_CommonInit(ADC1, &ADC_CommonInitStruct); //ADC1_2
 	
@@ -328,7 +329,6 @@ void adc_dma_init()
 	
 	ADC_VrefintCmd(ADC2, ENABLE); //VRefInt:Channel18
 	
-	ADC_DMACmd(ADC1, ENABLE);
 	ADC_Cmd(ADC1, ENABLE); ADC_Cmd(ADC2, ENABLE);
 	while (! (ADC_GetFlagStatus(ADC1, ADC_FLAG_RDY) && ADC_GetFlagStatus(ADC2, ADC_FLAG_RDY)));
 	
